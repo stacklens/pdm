@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import functools
 import warnings
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union
 
 from pip._vendor.pkg_resources import safe_extra
 from pip_shims import shims
@@ -22,10 +23,43 @@ vcs = shims.VcsSupport()
 
 
 def get_sdist(egg_info) -> Optional[EggInfoDistribution]:
+    """Get a distribution from egg_info directory."""
     return EggInfoDistribution(egg_info) if egg_info else None
 
 
+@functools.lru_cache(128)
+def get_requirements_from_dist(
+    dist: EggInfoDistribution, extras: Sequence[str]
+) -> List[str]:
+    """Get requirements of a distribution, with given extras."""
+    extras_in_metadata = []
+    result = []
+    dep_map = dist._build_dep_map()
+    for extra, reqs in dep_map.items():
+        reqs = [Requirement.from_pkg_requirement(r) for r in reqs]
+        if not extra:
+            # requirements without extras are always required.
+            result.extend(r.as_line() for r in reqs)
+        else:
+            new_extra, _, marker = extra.partition(":")
+            extras_in_metadata.append(new_extra.strip())
+            # Only include requirements that match one of extras.
+            if not new_extra.strip() or safe_extra(new_extra.strip()) in extras:
+                marker = Marker(marker) if marker else None
+                for r in reqs:
+                    r.marker = marker
+                    result.append(r.as_line())
+    extras_not_found = [e for e in extras if e not in extras_in_metadata]
+    if extras_not_found:
+        warnings.warn(ExtrasError(extras_not_found), stacklevel=2)
+    return result
+
+
 def identify(req: Union[Candidate, Requirement]) -> Optional[str]:
+    """Get the identity of a candidate or requirement.
+    The result carries the extras information to distinguish from the same package
+    with different extras.
+    """
     if isinstance(req, Candidate):
         req = req.req
     if req.key is None:
@@ -37,7 +71,11 @@ def identify(req: Union[Candidate, Requirement]) -> Optional[str]:
 
 
 class Candidate:
-    """A concrete candidate that can be downloaded and installed."""
+    """A concrete candidate that can be downloaded and installed.
+    A candidate comes from the PyPI index of a package, or from the requirement itself
+    (for file or VCS requirements). Each candidate has a name, version and several
+    dependencies together with package metadata.
+    """
 
     def __init__(
         self,
@@ -48,6 +86,13 @@ class Candidate:
         link=None,  # type: shims.Link
     ):
         # type: (...) -> None
+        """
+        :param req: the requirement that produces this candidate.
+        :param environment: the bound environment instance.
+        :param name: the name of the candidate.
+        :param version: the version of the candidate.
+        :param link: the file link of the candidate.
+        """
         self.req = req
         self.environment = environment
         self.name = name or self.req.project_name
@@ -62,6 +107,10 @@ class Candidate:
 
         self.wheel = None
         self.metadata = None
+
+        # Dependencies from lockfile content.
+        self.dependencies = None
+        self.summary = None
 
     def __hash__(self):
         return hash((self.name, self.version))
@@ -82,6 +131,9 @@ class Candidate:
         return vcs.get_backend(self.req.vcs).get_revision(self.ireq.source_dir)
 
     def get_metadata(self) -> Optional[Metadata]:
+        """Get the metadata of the candidate.
+        For editable requirements, egg info are produced, otherwise a wheel is built.
+        """
         if self.metadata is not None:
             return self.metadata
         ireq = self.ireq
@@ -117,45 +169,30 @@ class Candidate:
         environment,  # type: Environment
     ):
         # type: (...) -> Candidate
+        """Build a candidate from pip's InstallationCandidate."""
         inst = cls(
             req,
             environment,
-            name=candidate.project,
+            name=candidate.name,
             version=candidate.version,
             link=candidate.link,
         )
         return inst
 
     def get_dependencies_from_metadata(self) -> List[str]:
+        """Get the dependencies of a candidate from metadata."""
         extras = self.req.extras or ()
         metadata = self.get_metadata()
-        result = []
         if self.req.editable:
             if not metadata:
-                return result
-            extras_in_metadata = []
-            dep_map = self.ireq.get_dist()._build_dep_map()
-            for extra, reqs in dep_map.items():
-                reqs = [Requirement.from_pkg_requirement(r) for r in reqs]
-                if not extra:
-                    result.extend(r.as_line() for r in reqs)
-                else:
-                    new_extra, _, marker = extra.partition(":")
-                    extras_in_metadata.append(new_extra.strip())
-                    if not new_extra.strip() or safe_extra(new_extra.strip()) in extras:
-                        marker = Marker(marker) if marker else None
-                        for r in reqs:
-                            r.marker = marker
-                            result.append(r.as_line())
-            extras_not_found = [e for e in extras if e not in extras_in_metadata]
-            if extras_not_found:
-                warnings.warn(ExtrasError(extras_not_found), stacklevel=2)
+                return []
+            return get_requirements_from_dist(self.ireq.get_dist(), extras)
         else:
-            result = filter_requirements_with_extras(metadata.run_requires, extras)
-        return result
+            return filter_requirements_with_extras(metadata.run_requires, extras)
 
     @property
     def requires_python(self) -> str:
+        """The Python version constraint of the candidate."""
         if self._requires_python is not None:
             return self._requires_python
         requires_python = self.link.requires_python or ""
@@ -175,7 +212,12 @@ class Candidate:
             requires_python = f">={requires_python},<{int(requires_python) + 1}"
         return requires_python
 
+    @requires_python.setter
+    def requires_python(self, value: str) -> None:
+        self._requires_python = value
+
     def as_lockfile_entry(self) -> Dict[str, Any]:
+        """Build a lockfile entry dictionary for the candidate."""
         result = {
             "name": self.name,
             "sections": sorted(self.sections),
@@ -194,6 +236,7 @@ class Candidate:
         return {k: v for k, v in result.items() if v}
 
     def format(self) -> str:
+        """Format for output."""
         return (
             f"{context.io.green(self.name, bold=True)} "
             f"{context.io.yellow(str(self.version))}"

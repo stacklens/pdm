@@ -25,32 +25,6 @@ if TYPE_CHECKING:
     from tomlkit.container import Container
 
 
-def pyproject_cache(func):
-    """Caches the function's result as long as the project file isn't changed."""
-    _cache = _missing = object()
-
-    def getter(self, *args, **kwargs):
-        nonlocal _cache
-        if self._pyproject is None or _cache is _missing:
-            _cache = func(self, *args, **kwargs)
-        return _cache
-
-    return getter
-
-
-def lockfile_cache(func):
-    """Caches the function's result as long as the project file isn't changed."""
-    _cache = _missing = object()
-
-    def getter(self, *args, **kwargs):
-        nonlocal _cache
-        if self._lockfile is None or _cache is _missing:
-            _cache = func(self, *args, **kwargs)
-        return _cache
-
-    return getter
-
-
 class Project:
     PYPROJECT_FILENAME = "pyproject.toml"
     PDM_NAMESPACE = "tool.pdm"
@@ -83,10 +57,11 @@ class Project:
         return self._pyproject
 
     @property
-    @pyproject_cache
     def tool_settings(self):
         # type: () -> Union[Container, Dict]
         data = self.pyproject
+        if not data:
+            return {}
         for sec in self.PDM_NAMESPACE.split("."):
             data = data.setdefault(sec, {})
         return data
@@ -108,19 +83,16 @@ class Project:
         return self._config
 
     @property
-    @pyproject_cache
     def is_pdm(self) -> bool:
         if not self.pyproject_file.is_file():
             return False
         return bool(self.tool_settings)
 
     @property
-    @pyproject_cache
     def environment(self) -> Environment:
         return Environment(self.python_requires, self.config)
 
     @property
-    @pyproject_cache
     def python_requires(self) -> PySpecSet:
         return PySpecSet(self.tool_settings.get("python_requires", ""))
 
@@ -139,12 +111,10 @@ class Project:
         return result
 
     @property
-    @pyproject_cache
     def dependencies(self) -> Dict[str, Requirement]:
         return self.get_dependencies()
 
     @property
-    @pyproject_cache
     def dev_dependencies(self) -> Dict[str, Requirement]:
         return self.get_dependencies("dev")
 
@@ -157,19 +127,16 @@ class Project:
             yield section
 
     @property
-    @pyproject_cache
     def all_dependencies(self) -> Dict[str, Dict[str, Requirement]]:
         return {
             section: self.get_dependencies(section) for section in self.iter_sections()
         }
 
     @property
-    @pyproject_cache
     def allow_prereleases(self) -> Optional[bool]:
         return self.tool_settings.get("allow_prereleases")
 
     @property
-    @pyproject_cache
     def sources(self) -> Optional[List[Source]]:
         return self.tool_settings.get("source")
 
@@ -210,16 +177,24 @@ class Project:
             return {}
         section = section or "default"
         result = {}
-        for package in [dict(p) for p in self.lockfile["package"]]:
+        for package in [dict(p) for p in self.lockfile.get("package", [])]:
             if section != "__all__" and section not in package["sections"]:
                 continue
             version = package.get("version")
             if version:
                 package["version"] = f"=={version}"
             package_name = package.pop("name")
+            summary = package.pop("summary", None)
+            dependencies = [
+                Requirement.from_req_dict(k, v)
+                for k, v in package.pop("dependencies", {}).items()
+            ]
             req = Requirement.from_req_dict(package_name, dict(package))
             can = Candidate(req, self.environment, name=package_name, version=version)
             can.marker = req.marker
+            can.requires_python = str(req.requires_python)
+            can.dependencies = dependencies
+            can.summary = summary
             can.hashes = {
                 item["file"]: item["hash"]
                 for item in self.lockfile["metadata"].get(
@@ -228,7 +203,7 @@ class Project:
             } or None
             result[identify(req)] = can
         if section in ("default", "__all__") and self.meta.name:
-            result[safe_name(self.meta.name).lower()] = self.make_self_candidate()
+            result[safe_name(self.meta.name).lower()] = self.make_self_candidate(True)
         return result
 
     def get_content_hash(self, algo: str = "md5") -> str:
@@ -292,6 +267,5 @@ class Project:
         self._pyproject = None
 
     @property
-    @pyproject_cache
     def meta(self) -> PackageMeta:
         return PackageMeta(self)

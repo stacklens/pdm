@@ -12,8 +12,6 @@ with `Pipenv` or `Poetry` and don't want to introduce another package manager,
 just stick to it. But if you are missing something that is not present in those tools,
 you can probably find some goodness in `pdm`.
 
-**Open for feature requests, find yourself at https://github.com/pdm-project/call-for-features.**
-
 ## Highlights of features
 
 - PEP 582 local package installer and runner, no virtualenv involved at all.
@@ -37,11 +35,11 @@ Moreover, due to the same reason, it can't act as a PEP 517 backend.
 
 PDM requires python version 3.7 or higher.
 
+It is recommended to install `pdm` in an isolated enviroment, with `pipx`.
+
 ```bash
 $ pipx install pdm
 ```
-
-It is recommended to install `pdm` in an isolated enviroment, with `pipx`.
 
 Or you can install it under user site:
 
@@ -52,6 +50,28 @@ $ pip install --user pdm
 ## Usage
 
 `python -m pdm --help` should be a good guidance.
+
+## FAQ
+
+### 1. What is put in `__pypackages__`?
+
+PEP 582 is a draft proposal which still needs a lot of polishment, for instance, it doesn't mention how to manage
+CLI executables. PDM take the decision to put `bin`, `include` together with `lib` under `__pypackage__/X.Y`.
+
+### 2. How to run CLI scripts in the local package directory?
+
+The recommended way is to prefix your command with `pdm run`. It is also possible to run CLI scripts directly from
+the outside, the PDM's installer has already injected the package path to the `sys.path` in the entry script file.
+
+### 3. What site-packages will be loaded when using PDM?
+
+PDM first looks to `__pypackages__` but will fall back to looking in site-packages. This is not entirely hermetic
+and could lead to some confusion around which packages are being used, though.
+
+### 4. Can I relocate or move the `__pypackages__` folder for deployment?
+
+You'd better not. The packages installed inside `__pypackages__` are OS dependent. Instead, you should keep `pdm.lock`
+in VCS and do `pdm sync` on the target environment to deploy.
 
 ## Credits
 

@@ -1,8 +1,12 @@
 import functools
+import os
+import shutil
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 from pdm.cli import actions, commands
+from pdm.models.requirements import parse_requirement
 
 
 @pytest.fixture()
@@ -64,3 +68,73 @@ def test_list_command(project, invoke, mocker):
     do_list = mocker.patch.object(actions, "do_list")
     invoke(["list"], obj=project)
     do_list.assert_called_once()
+
+
+def test_info_command(project, invoke):
+    result = invoke(["info"], obj=project)
+    assert "Project Root:" in result.output
+    assert project.root.as_posix() in result.output
+
+    result = invoke(["info", "--python"], obj=project)
+    assert result.output.strip() == project.environment.python_executable
+
+    result = invoke(["info", "--project"], obj=project)
+    assert result.output.strip() == project.root.as_posix()
+
+    result = invoke(["info", "--env"], obj=project)
+    assert result.exit_code == 0
+
+
+def test_run_command(invoke, capfd):
+    result = invoke(["run", "python", "-c", "import halo;print(halo.__file__)"])
+    assert result.exit_code == 0
+    assert os.sep.join(["pdm", "__pypackages__"]) in capfd.readouterr()[0]
+
+
+def test_run_command_not_found(invoke):
+    result = invoke(["run", "foobar"])
+    assert result.exit_code == 2
+    assert "Error: Command 'foobar' is not found on your PATH." in result.output
+
+
+def test_run_pass_exit_code(invoke):
+    result = invoke(["run", "python", "-c", "1/0"])
+    assert result.exit_code == 1
+
+
+def test_uncaught_error(invoke, mocker):
+    mocker.patch.object(actions, "do_list", side_effect=RuntimeError("test error"))
+    result = invoke(["list"])
+    assert "RuntimeError: test error" in result.output
+
+    result = invoke(["list", "-v"])
+    assert isinstance(result.exception, RuntimeError)
+
+
+def test_use_command(project, invoke):
+    python_path = Path(shutil.which("python")).as_posix()
+    result = invoke(["use", "python"], obj=project)
+    assert result.exit_code == 0
+    config_content = project.root.joinpath(".pdm.toml").read_text()
+    assert python_path in config_content
+
+    result = invoke(["use", python_path], obj=project)
+    assert result.exit_code == 0
+
+    project.tool_settings["python_requires"] = ">=3.6"
+    project.write_pyproject()
+    result = invoke(["use", "2.7"], obj=project)
+    assert result.exit_code == 1
+
+
+def test_install_with_lockfile(project, invoke, working_set, repository):
+    result = invoke(["lock"], obj=project)
+    assert result.exit_code == 0
+    result = invoke(["install"], obj=project)
+    assert "Lock file" not in result.output
+
+    project.add_dependencies({"pytz": parse_requirement("pytz")})
+    result = invoke(["install"], obj=project)
+    assert "Lock file hash doesn't match" in result.output
+    assert "pytz" in project.get_locked_candidates()
+    assert project.is_lockfile_hash_match()

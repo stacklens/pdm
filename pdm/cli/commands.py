@@ -1,6 +1,5 @@
-import os
-import shutil
 import subprocess
+import sys
 
 import click
 from click._compat import term_len
@@ -14,7 +13,6 @@ from pdm.cli.options import (
     verbose_option,
 )
 from pdm.context import context
-from pdm.exceptions import CommandNotFound
 from pdm.project import Project
 from pdm.utils import get_user_email_from_git
 
@@ -62,12 +60,27 @@ class ColoredHelpFormatter(HelpFormatter):
 click.core.HelpFormatter = ColoredHelpFormatter
 
 
-@click.group(help="PDM - Python Development Master")
+class PdmGroup(click.Group):
+    def main(self, *args, **kwargs):
+        # Catches all unhandled exceptions and reraise them with PdmException
+        try:
+            super().main(*args, **kwargs)
+        except Exception:
+            etype, err, traceback = sys.exc_info()
+            if context.io.verbosity > context.io.NORMAL:
+                raise err.with_traceback(traceback)
+            else:
+                context.io.echo("{}: {}".format(etype.__name__, err), err=True)
+                sys.exit(1)
+
+
+@click.group(cls=PdmGroup)
 @verbose_option
 @click.version_option(
     prog_name=context.io._style("pdm", bold=True), version=context.version
 )
 def cli():
+    """PDM - Python Development Master"""
     pass
 
 
@@ -90,10 +103,15 @@ def lock(project):
 )
 @pass_project
 def install(project, sections, dev, default, lock):
-    if lock and not (
-        project.lockfile_file.is_file() and project.is_lockfile_hash_match()
-    ):
-        actions.do_lock(project)
+    if lock:
+        if not project.lockfile_file.exists():
+            context.io.echo("Lock file does not exist, trying to generate one...")
+            actions.do_lock(project, strategy="all")
+        elif not project.is_lockfile_hash_match():
+            context.io.echo(
+                "Lock file hash doesn't match pyproject.toml, regenerating..."
+            )
+            actions.do_lock(project, strategy="reuse")
     actions.do_sync(project, sections, dev, default, False, False)
 
 
@@ -107,10 +125,14 @@ def install(project, sections, dev, default, lock):
 @pass_project
 def run(project, command, args):
     with project.environment.activate():
-        expanded_command = shutil.which(command, path=os.getenv("PATH"))
+        expanded_command = project.environment.which(command)
         if not expanded_command:
-            raise CommandNotFound(command)
-        subprocess.run([expanded_command] + list(args))
+            raise click.UsageError(
+                "Command {} is not found on your PATH.".format(
+                    context.io.green(f"'{command}'")
+                )
+            )
+        sys.exit(subprocess.call([expanded_command] + list(args)))
 
 
 @cli.command(help="Synchronizes current working set with lock file.")
@@ -164,10 +186,20 @@ def add(project, dev, section, sync, save, strategy, editables, packages):
 @verbose_option
 @sections_option
 @update_strategy_option
+@save_strategy_option
+@click.option(
+    "-u",
+    "--unconstrained",
+    is_flag=True,
+    default=False,
+    help="Ignore the version constraint of packages.",
+)
 @click.argument("packages", nargs=-1)
 @pass_project
-def update(project, dev, sections, default, strategy, packages):
-    actions.do_update(project, dev, sections, default, strategy, packages)
+def update(project, dev, sections, default, strategy, save, unconstrained, packages):
+    actions.do_update(
+        project, dev, sections, default, strategy, save, unconstrained, packages
+    )
 
 
 @cli.command(help="Remove packages from pyproject.toml")
@@ -193,11 +225,15 @@ def remove(project, dev, section, sync, packages):
     actions.do_remove(project, dev, section, sync, packages)
 
 
-@cli.command(name="list", help="List packages installed in current working set.")
+@cli.command(name="list")
 @verbose_option
+@click.option(
+    "--graph", is_flag=True, default=False, help="Display a graph of dependencies."
+)
 @pass_project
-def list_(project):
-    actions.do_list(project)
+def list_(project, graph):
+    """List packages installed in the current working set."""
+    actions.do_list(project, graph)
 
 
 @cli.command(help="Build artifacts for distribution.")
@@ -226,6 +262,7 @@ def build(project, sdist, wheel, dest, clean):
 
 
 @cli.command(help="Initialize a pyproject.toml for PDM.")
+@verbose_option
 @pass_project
 def init(project):
     if project.pyproject_file.exists():
@@ -246,3 +283,23 @@ def init(project):
     author = click.prompt(f"Author name", default=git_user)
     email = click.prompt(f"Author email", default=git_email)
     actions.do_init(project, name, version, license, author, email)
+
+
+@cli.command()
+@click.argument("python")
+@pass_project
+def use(project, python):
+    """Use the given python version as base interpreter."""
+    actions.do_use(project, python)
+
+
+@cli.command()
+@click.option("-p", "--python", is_flag=True, help="Show the interpreter path.")
+@click.option(
+    "-d", "--project", "show_project", is_flag=True, help="Show the project root path."
+)
+@click.option("--env", is_flag=True, help="Show PEP508 environment markers.")
+@pass_project
+def info(project, python, show_project, env):
+    """Show the project information."""
+    actions.do_info(project, python, show_project, env)
